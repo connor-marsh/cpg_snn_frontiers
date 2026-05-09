@@ -1457,7 +1457,7 @@ def main():
         description="CPG-SNN robust multi-gait controller — chunk-based CPG")
 
     # ── CPG ─────────────────────────────────────────────────────
-    parser.add_argument("--tmax",            type=int,   default=40_000)
+    parser.add_argument("--tmax",            type=int,   default=50_000)
     parser.add_argument("--cpg_start_time",  type=int,   default=5000)
     parser.add_argument("--chunk_size",      type=int,   default=50,
                         help="Steps per solve_ivp call in CPGChunkStepper. "
@@ -1487,7 +1487,7 @@ def main():
 
     # ── Misc ─────────────────────────────────────────────────────
     parser.add_argument("--seed",            type=int,   default=42)
-    parser.add_argument("--out_dir",         type=str,   default="vishnu_final_version")
+    parser.add_argument("--out_dir",         type=str,   default="cpg_snn/outputs")
 
     args = parser.parse_args()
 

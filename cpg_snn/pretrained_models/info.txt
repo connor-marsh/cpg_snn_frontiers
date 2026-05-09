@@ -1,0 +1,1 @@
+Keep this folder untouched, and copy the the .json and .onnx files into the "outputs" folder before running inference

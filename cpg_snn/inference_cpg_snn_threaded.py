@@ -992,14 +992,12 @@ for topic_name in ALL_LEG_JOINTS:
 def main():
     parser = argparse.ArgumentParser(
         description="CPG-SNN multi-gait inference (ONNX Runtime)")
-    parser.add_argument("--out_dir",   type=str,  default="vishnu_final_version",
+    parser.add_argument("--out_dir",   type=str,  default="cpg_snn/outputs",
                         help="Directory containing cpg_snn.onnx and "
                              "cpg_snn_config.json")
-    parser.add_argument("--t_max",    type=int,  default=35_000,
+    parser.add_argument("--t_max",    type=int,  default=50_000,
                         help="Inference steps after warm-up")
-    parser.add_argument("--no_robot", action="store_true",
-                        help="Skip robot connection and serial thread "
-                             "(useful for offline testing / analysis)")
+    parser.add_argument("--robot_mode", type="string", default="no_robot", help="Options: no_robot, bittle, bittle_sim, unitree_sim")
     args = parser.parse_args()
 
     out_dir   = Path(args.out_dir)
@@ -1014,11 +1012,11 @@ def main():
     cfg = load_config(out_dir)
 
     # ── Robot connection (skipped in --no_robot mode) ────────────
-    if not args.no_robot:
-        # from PetoiRobot import autoConnect, send, goodPorts
-        # autoConnect()
-        # send(goodPorts, ['XAd', 0])
-        # send(goodPorts, ['XGp', 0])
+    if args.robot_mode=="bittle":
+        from PetoiRobot import autoConnect, send, goodPorts
+        autoConnect()
+        send(goodPorts, ['XAd', 0])
+        send(goodPorts, ['XGp', 0])
         print("  Robot connected.")
     else:
         print("  --no_robot: skipping robot connection.")
