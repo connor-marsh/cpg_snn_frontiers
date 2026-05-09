@@ -49,9 +49,6 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from pathlib import Path
 
-import rospy
-from std_msgs.msg import Float64
-
 
 # ═══════════════════════════════════════════════════════════════════
 # 1.  Config loader
@@ -426,40 +423,47 @@ class SharedState:
 def serial_worker(shared, n_joints, stop_event):
     """
     Daemon thread owning all serial I/O.
-    Only imported and started when --no_robot is NOT set.
     """
-    
-    # Import here so the module loads cleanly without a robot
-    # from PetoiRobot import send, goodPorts, readGestureVal
 
     cur_gesture = 0
     while not stop_event.is_set():
 
         cmd, ready = shared.get_cmd()
         if ready and cmd is not None:
-            # ROS commands (comment for real hardware)
-            for i, joint_name in enumerate(ALL_LEG_JOINTS):
-                msg = Float64(data=JOINT_DIRECTIONS[i]*(cmd[i]+JOINT_OFFSETS[i]))
-                publishers[joint_name].publish(msg)
-        rate.sleep()
 
+            if cmd[0] == "I": # REAL HARDWARE:
+                from PetoiRobot import send, goodPorts, readGestureVal
+                cmd, ready = shared.get_cmd()
+                if ready and cmd is not None:
+                    try:
+                        send(goodPorts, cmd)
+                    except Exception as e:
+                        print(f"  [serial] send error: {e}")
 
-        # cmd, ready = shared.get_cmd()
-        # if ready and cmd is not None:
-        #     try:
-        #         send(goodPorts, cmd)
-        #     except Exception as e:
-        #         print(f"  [serial] send error: {e}")
+                try:
+                    gesture = readGestureVal()
+                    if gesture is not None and gesture != -1:
+                        if gesture != cur_gesture:
+                            print(f"  [serial] gait {cur_gesture} → {gesture}")
+                            cur_gesture = gesture
+                        shared.set_gait(cur_gesture)
+                except Exception as e:
+                    print(f"  [serial] gesture read error: {e}")
 
-        # try:
-        #     gesture = readGestureVal()
-        #     if gesture is not None and gesture != -1:
-        #         if gesture != cur_gesture:
-        #             print(f"  [serial] gait {cur_gesture} → {gesture}")
-        #             cur_gesture = gesture
-        #         shared.set_gait(cur_gesture)
-        # except Exception as e:
-        #     print(f"  [serial] gesture read error: {e}")
+            else: # SIM
+                from std_msgs.msg import Float64
+                for i, joint_name in enumerate(command_topics[:8]):
+                    msg = Float64(data=JOINT_DIRECTIONS[i]*(cmd[i]+JOINT_OFFSETS[i]))
+                    publishers[joint_name].publish(msg)
+                
+                if len(command_topics) > 8:
+                    publishers["/a1_gazebo/FL_hip_joint/command"].publish(0)
+                    publishers["/a1_gazebo/FR_hip_joint/command"].publish(0)
+                    publishers["/a1_gazebo/RR_hip_joint/command"].publish(-0.1)
+                    publishers["/a1_gazebo/RL_hip_joint/command"].publish(0.1)
+                rate.sleep()
+
+        
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -739,7 +743,7 @@ def run_inference(cfg, onnx_path, out_dir,
                   t_max=50_000,
                   gait_schedule=None,
                   record=True,
-                  robot=True):
+                  robot_mode="no_robot"):
     """
     Two-thread inference loop.
 
@@ -782,7 +786,7 @@ def run_inference(cfg, onnx_path, out_dir,
     stop_event = _threading.Event()
 
     # ── Serial thread (only when robot is connected) ─────────────
-    if robot:
+    if robot_mode != "no_robot":
         ser_thread = _threading.Thread(
             target=serial_worker,
             args=(shared, n_joints, stop_event),
@@ -792,7 +796,7 @@ def run_inference(cfg, onnx_path, out_dir,
         print("  Serial thread started.")
     else:
         ser_thread = None
-        print("  --no_robot: serial thread suppressed.")
+        print("  No robot: serial thread suppressed.")
 
     # ── Inference components ─────────────────────────────────────
     predictor = ONNXGaitPredictor(onnx_path)
@@ -884,22 +888,25 @@ def run_inference(cfg, onnx_path, out_dir,
                 t0        = time.perf_counter()
                 window    = event_buf.get()
                 pred_norm = predictor.predict(window, active_gait)  # FiLM
-                pred_deg  = pred_norm * scale + shift
+                pred  = pred_norm * scale + shift
                 lat_ms    = (time.perf_counter() - t0) * 1000
                 latencies.append(lat_ms)
 
-                simulation=True #TODO make this an arg
                 # Hand off command (no-op if no serial thread)
                 
-                if simulation:
-                    cmd = [int(np.clip(pred_deg[j], -124, 124)) for j in range(n_joints)]
-                    cmd = np.radians(np.array(cmd))
-                    shared.set_cmd(cmd)
-                elif robot:
+                if robot_mode=="bittle":
                     cmd_flat = sum(
-                        [[j + 8, int(np.clip(pred_deg[j], -124, 124))]
+                        [[j + 8, int(np.clip(pred[j], -124, 124))]
                          for j in range(n_joints)], [])
                     shared.set_cmd(['I', cmd_flat, 0.0])
+                elif robot_mode=="bittle_sim":
+                    cmd = [int(np.clip(pred[j], -124, 124)) for j in range(n_joints)]
+                    cmd = np.radians(np.array(cmd))
+                    shared.set_cmd(cmd)
+                elif robot_mode=="unitree_sim":
+                    cmd = [int(pred[j]) for j in range(n_joints)]
+                    cmd = np.radians(np.array(cmd))
+                    shared.set_cmd(cmd)
 
                 if record:
                     gait_table = GAIT_TABLES[active_gait]
@@ -910,7 +917,7 @@ def run_inference(cfg, onnx_path, out_dir,
                     rec_neuron.append(neuron_id)
                     rec_phase_deg.append(float(np.degrees(abs_phase_rad)))
                     rec_gait_idx.append(active_gait)
-                    rec_pred.append(pred_deg.copy())
+                    rec_pred.append(pred.copy())
                     rec_true.append(
                         gait_table[row_idx].astype(np.float32))
 
@@ -953,42 +960,6 @@ def run_inference(cfg, onnx_path, out_dir,
 # ═══════════════════════════════════════════════════════════════════
 
 
-# Ros stuff
-PUBLISH_RATE = 50.0 # Hz (Control frequency)
-# ALL_LEG_JOINTS = [
-#     'shrfs_joint_position_controller', # 0: Front Right Shoulder
-#     'shrft_joint_position_controller', # 1: Front Right Knee
-#     'shlfs_joint_position_controller', # 2: Front Left Shoulder
-#     'shlft_joint_position_controller', # 3: Front Left Knee
-#     'shrrs_joint_position_controller', # 4: Back Right Shoulder
-#     'shrrt_joint_position_controller', # 5: Back Right Knee
-#     'shlrs_joint_position_controller', # 6: Back Left Shoulder
-#     'shlrt_joint_position_controller', # 7: Back Left Knee
-# ]
-### ARRANGEMNET FROM DYNAMIC FSM REPO
-ALL_LEG_JOINTS = [
-    'left_front_shoulder_joint_position_controller', # 0: Front Right Shoulder
-    'right_front_shoulder_joint_position_controller', # 1: Front Right Knee
-    'right_back_shoulder_joint_position_controller', # 2: Front Left Shoulder
-    'left_back_shoulder_joint_position_controller', # 3: Front Left Knee
-    'left_front_knee_joint_position_controller', # 4: Back Right Shoulder
-    'right_front_knee_joint_position_controller', # 5: Back Right Knee
-    'right_back_knee_joint_position_controller', # 6: Back Left Shoulder
-    'left_back_knee_joint_position_controller', # 7: Back Left Knee
-]
-JOINT_OFFSETS = [
-    0,0,0,0,0,0,0,0
-]
-JOINT_DIRECTIONS = [
-    1, -1, -1, 1, 1, -1, -1, 1
-]
-
-rospy.init_node('gait_decoder_commander_node', anonymous=True)
-rate = rospy.Rate(PUBLISH_RATE)
-publishers = {}
-for topic_name in ALL_LEG_JOINTS:
-    publishers[topic_name] = rospy.Publisher(f'/{topic_name}/command', Float64, queue_size=1)
-
 def main():
     parser = argparse.ArgumentParser(
         description="CPG-SNN multi-gait inference (ONNX Runtime)")
@@ -997,7 +968,7 @@ def main():
                              "cpg_snn_config.json")
     parser.add_argument("--t_max",    type=int,  default=50_000,
                         help="Inference steps after warm-up")
-    parser.add_argument("--robot_mode", type="string", default="no_robot", help="Options: no_robot, bittle, bittle_sim, unitree_sim")
+    parser.add_argument("--robot_mode", type=str, default="no_robot", help="Options: no_robot, bittle, bittle_sim, unitree_sim")
     args = parser.parse_args()
 
     out_dir   = Path(args.out_dir)
@@ -1018,8 +989,57 @@ def main():
         send(goodPorts, ['XAd', 0])
         send(goodPorts, ['XGp', 0])
         print("  Robot connected.")
+    elif args.robot_mode=="bittle_sim" or args.robot_mode=="unitree_sim":
+        import rospy
+        from std_msgs.msg import Float64
+        global command_topics, JOINT_DIRECTIONS, JOINT_OFFSETS, publishers, PUBLISH_RATE, rate
+        PUBLISH_RATE = 50.0 # Hz (Control frequency)
+        rospy.init_node('gait_decoder_commander_node', anonymous=True)
+        rate = rospy.Rate(PUBLISH_RATE)
+        if args.robot_mode=="bittle_sim":
+            command_topics = [
+                'left_front_shoulder_joint_position_controller/command', # 0: Front Right Shoulder
+                'right_front_shoulder_joint_position_controller/command', # 1: Front Right Knee
+                'right_back_shoulder_joint_position_controller/command', # 2: Front Left Shoulder
+                'left_back_shoulder_joint_position_controller/command', # 3: Front Left Knee
+                'left_front_knee_joint_position_controller/command', # 4: Back Right Shoulder
+                'right_front_knee_joint_position_controller/command', # 5: Back Right Knee
+                'right_back_knee_joint_position_controller/command', # 6: Back Left Shoulder
+                'left_back_knee_joint_position_controller/command', # 7: Back Left Knee
+            ]
+            JOINT_OFFSETS = [
+                0,0,0,0,0,0,0,0
+            ]
+            JOINT_DIRECTIONS = [
+                1, -1, -1, 1, 1, -1, -1, 1
+            ]
+            
+        else:
+            command_topics = [
+                    "/a1_gazebo/FL_thigh_joint/command",
+                    "/a1_gazebo/FR_thigh_joint/command",
+                    "/a1_gazebo/RR_thigh_joint/command",
+                    "/a1_gazebo/RL_thigh_joint/command",
+                    "/a1_gazebo/FL_calf_joint/command",
+                    "/a1_gazebo/FR_calf_joint/command",
+                    "/a1_gazebo/RR_calf_joint/command",
+                    "/a1_gazebo/RL_calf_joint/command",
+                    "/a1_gazebo/FL_hip_joint/command",
+                    "/a1_gazebo/FR_hip_joint/command",
+                    "/a1_gazebo/RR_hip_joint/command",
+                    "/a1_gazebo/RL_hip_joint/command"
+                    ]
+            JOINT_OFFSETS = [
+                0,0,0,0,-np.pi*0.5,-np.pi*0.5,-np.pi*0.5,-np.pi*0.5
+            ]
+            JOINT_DIRECTIONS = [
+                1, 1, 1, 1, 1, 1, 1, 1
+            ]
+        publishers = {}
+        for topic_name in command_topics:
+            publishers[topic_name] = rospy.Publisher(topic_name, Float64, queue_size=1)
     else:
-        print("  --no_robot: skipping robot connection.")
+        print("Skipping Robot Connection")
 
     # ── Scripted gait schedule ───────────────────────────────────
     # Uncomment and edit to test scripted gait transitions:
@@ -1035,9 +1055,9 @@ def main():
     data = run_inference(
         cfg, onnx_path, out_dir,
         t_max=args.t_max,
-        gait_schedule=gait_schedule,
+        gait_schedule=(None if args.robot_mode=="bittle" else gait_schedule),
         record=True,
-        robot=not args.no_robot)
+        robot_mode=args.robot_mode)
 
     if data is None or len(data["rec_t"]) == 0:
         print("No spike events recorded — check CPG parameters.")

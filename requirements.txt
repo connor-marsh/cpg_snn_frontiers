@@ -65,9 +65,11 @@ onnx==1.17.0
 onnxruntime==1.16.3
 packaging==26.2
 pandas==2.0.3
+petoi-robot @ git+https://github.com/PetoiCamp/DesktopAppRelease.git@main#subdirectory=pyUI/PetoiRobot
 pillow==10.4.0
 protobuf==5.29.6
 pyparsing==3.1.4
+pyserial==3.5
 python-dateutil==2.9.0.post0
 python-qt-binding==0.4.6
 pytz==2026.2
